@@ -62,8 +62,7 @@ export default function Home() {
         <div className="max-w-[1200px] mx-auto px-6 py-8">
           <div className="text-center">
             <p className="text-[#c2ceab]/60 text-sm tracking-wide uppercase mb-3">Demo för</p>
-            <h1 className="text-3xl font-semibold tracking-wide text-[#c2ceab]">Stockholm Rehab</h1>
-            <p className="text-sm text-[#c2ceab]/50 mt-1">Kiropraktor & Rehabklinik</p>
+            <h1 className="text-3xl font-semibold tracking-wide text-[#c2ceab]">Aspen Rehabklinik</h1>
           </div>
         </div>
       </header>
