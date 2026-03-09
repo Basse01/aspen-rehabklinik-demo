@@ -1,45 +1,89 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
 
 export default function Home() {
   const [isRecording, setIsRecording] = useState(false);
   const [transcription, setTranscription] = useState("");
+  const [interimText, setInterimText] = useState("");
   const [formattedJournal, setFormattedJournal] = useState("");
-  const [isTranscribing, setIsTranscribing] = useState(false);
   const [isFormatting, setIsFormatting] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
   const [error, setError] = useState("");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  const wsRef = useRef<WebSocket | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const finalTranscriptRef = useRef("");
 
   const startRecording = async () => {
     try {
       setError("");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      chunksRef.current = [];
-      mediaRecorder.ondataavailable = (event) => { if (event.data.size > 0) chunksRef.current.push(event.data); };
-      mediaRecorder.onstop = () => { const blob = new Blob(chunksRef.current, { type: "audio/webm" }); stream.getTracks().forEach((track) => track.stop()); transcribeAudio(blob); };
-      mediaRecorder.start();
-      setIsRecording(true);
-    } catch (err) { setError("Kunde inte starta inspelning. Kontrollera mikrofonbehörighet."); }
+      setTranscription("");
+      setInterimText("");
+      finalTranscriptRef.current = "";
+
+      const tokenRes = await fetch("/api/deepgram-token");
+      const tokenData = await tokenRes.json();
+      if (!tokenRes.ok) throw new Error(tokenData.error || "Kunde inte hämta token");
+
+      const ws = new WebSocket(
+        "wss://api.eu.deepgram.com/v1/listen?language=sv&model=nova-2&smart_format=true&interim_results=true&endpointing=300",
+        ["token", tokenData.token]
+      );
+      wsRef.current = ws;
+
+      ws.onopen = async () => {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+        const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+        mediaRecorderRef.current = mediaRecorder;
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+            ws.send(event.data);
+          }
+        };
+
+        mediaRecorder.start(250);
+        setIsRecording(true);
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        const transcript = data.channel?.alternatives?.[0]?.transcript;
+        if (!transcript) return;
+
+        if (data.is_final) {
+          finalTranscriptRef.current += (finalTranscriptRef.current ? " " : "") + transcript;
+          setTranscription(finalTranscriptRef.current);
+          setInterimText("");
+        } else {
+          setInterimText(transcript);
+        }
+      };
+
+      ws.onerror = () => setError("WebSocket-anslutning till Deepgram misslyckades");
+      ws.onclose = () => setInterimText("");
+
+    } catch (err: any) { setError(err.message || "Kunde inte starta inspelning. Kontrollera mikrofonbehörighet."); }
   };
 
-  const stopRecording = () => { if (mediaRecorderRef.current && isRecording) { mediaRecorderRef.current.stop(); setIsRecording(false); } };
-
-  const transcribeAudio = async (blob: Blob) => {
-    setIsTranscribing(true); setError("");
-    try {
-      const formData = new FormData(); formData.append("audio", blob, "recording.webm");
-      const response = await fetch("/api/transcribe", { method: "POST", body: formData });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Transkribering misslyckades");
-      setTranscription(data.text);
-    } catch (err: any) { setError(err.message || "Ett fel uppstod vid transkribering"); } finally { setIsTranscribing(false); }
-  };
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "CloseStream" }));
+      wsRef.current.close();
+    }
+    setIsRecording(false);
+    setInterimText("");
+  }, []);
 
   const formatToJournal = async () => {
     if (!transcription) return;
@@ -62,7 +106,7 @@ export default function Home() {
         <div className="max-w-[1200px] mx-auto px-6 py-8">
           <div className="text-center">
             <p className="text-[#c2ceab]/60 text-sm tracking-wide uppercase mb-3">Demo för</p>
-            <h1 className="text-3xl font-semibold tracking-wide text-[#c2ceab]">Aspen Rehabklinik</h1>
+            <h1 className="text-3xl font-semibold tracking-wide text-[#c2ceab]">Stockholms Ryggklinik</h1>
           </div>
         </div>
       </header>
@@ -103,10 +147,10 @@ export default function Home() {
           <section className="bg-[#313d4f] rounded-2xl p-8 mb-8 shadow-sm border border-[#c2ceab]/10">
             <h2 className="text-2xl font-semibold text-[#c2ceab] mb-6">Transkribering</h2>
             <div className="relative">
-              <textarea readOnly value={transcription} placeholder="Transkriberad text visas här..." className="w-full h-[160px] p-5 bg-[#2b3545] border border-[#c2ceab]/15 rounded-xl resize-none text-[#c2ceab]/90 text-base placeholder-[#c2ceab]/25 focus:outline-none focus:border-[#c2ceab]/40 transition-colors" />
-              {isTranscribing && (<div className="absolute inset-0 bg-[#313d4f]/90 flex items-center justify-center rounded-xl"><div className="flex items-center gap-4"><svg className="animate-spin h-6 w-6 text-[#c2ceab]" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg><span className="text-[#c2ceab]/60 text-base font-medium">Transkriberar...</span></div></div>)}
+              <textarea readOnly value={transcription + (interimText ? (transcription ? " " : "") + interimText : "")} placeholder="Transkriberad text visas här i realtid..." className="w-full h-[160px] p-5 bg-[#2b3545] border border-[#c2ceab]/15 rounded-xl resize-none text-[#c2ceab]/90 text-base placeholder-[#c2ceab]/25 focus:outline-none focus:border-[#c2ceab]/40 transition-colors" />
+              {isRecording && (<div className="absolute top-3 right-3 flex items-center gap-2"><span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" /><span className="text-xs text-red-400 font-medium">LIVE</span></div>)}
             </div>
-            <button onClick={formatToJournal} disabled={!transcription || isTranscribing || isFormatting}
+            <button onClick={formatToJournal} disabled={!transcription || isRecording || isFormatting}
               className="mt-6 w-full py-4 px-8 bg-[#c2ceab] text-[#2b3545] font-semibold text-base tracking-wide rounded-lg transition-all duration-200 hover:bg-[#d0dabb] disabled:opacity-40 disabled:cursor-not-allowed">
               FORMATERA TILL JOURNAL
             </button>
